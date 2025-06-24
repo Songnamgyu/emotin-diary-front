@@ -1,65 +1,41 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import axios from "axios";
-import { store } from "../store";
 import {
     createAsyncThunk,
     createSlice,
     type PayloadAction,
 } from "@reduxjs/toolkit";
-
-export interface User {
-    id: string;
-    username: string;
-    email: string;
-    role?: string;
-    createdAt: string;
-}
-
-export interface LoginRequest {
-    email: string;
-    password: string;
-}
-
-export interface LoginResponse {
-    user: User;
-    message: string;
-    csrfToken?: string; // CSRF 토큰 (옵션)
-}
+import type {
+    LoginRequest,
+    LoginResponse,
+    SignupRequest,
+    SignupResponse,
+    User,
+} from "../../service/auth/authType";
+import { cookieStorage } from "../../service/client";
+import { authApi } from "../../service/auth/authApi";
 
 export interface AuthState {
     isAuthenticated: boolean;
     user: User | null;
+    accessToken: string | null;
+    refreshToken: string | null;
     loading: boolean;
     error: string | null;
-    csrfToken: string | null; // CSRF 토큰 상태
+    tokenExpiresAt: number | null; // 토큰 만료 시간 (timestamp)
 }
 
-// 🔸 Axios 인스턴스 설정
-const apiClient = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || "http://localhost:3000/api",
-    withCredentials: true, // 🍪 쿠키 자동 전송 활성화
-    headers: {
-        "Content-Type": "application/json",
-    },
-});
-
-// 🛡️ CSRF 토큰 인터셉터
-apiClient.interceptors.request.use((config) => {
-    const csrfToken = store.getState().auth.csrfToken;
-    if (csrfToken) {
-        config.headers["X-CSRF-Token"] = csrfToken;
-    }
-    return config;
-});
-
+// 초기 상태 설정 (쿠키에서 토큰 복원)
 const getInitialAuthState = (): Partial<AuthState> => {
-    // 🍪 Cookie는 서버에서만 접근 가능하므로 초기값만 설정
-    // 실제 인증 상태는 앱 시작시 /auth/me API로 확인
+    const accessToken = cookieStorage.getAccessToken();
+    const refreshToken = cookieStorage.getRefreshToken();
+
     return {
-        isAuthenticated: false,
-        user: null,
-        csrfToken: null,
+        isAuthenticated: !!(accessToken && refreshToken),
+        accessToken,
+        refreshToken,
+        user: null, // 사용자 정보는 checkAuthStatus에서 가져옴
+        tokenExpiresAt: null,
     };
 };
 
@@ -69,155 +45,208 @@ const initialState: AuthState = {
     ...getInitialAuthState(),
 } as AuthState;
 
-// 🔸 비동기 액션들
-
-/**
- * 🔍 현재 사용자 정보 확인 (앱 시작시)
- *
- * Cookie에 있는 토큰으로 사용자 정보를 가져옴
- * 새로고침 후 인증 상태를 복원하는데 사용
- */
-export const checkAuthStatus = createAsyncThunk<
-    LoginResponse,
-    void,
-    { rejectValue: string }
->("auth/checkAuthStatus", async (_, { rejectWithValue }) => {
-    try {
-        // 🍪 Cookie의 토큰으로 사용자 정보 조회
-        const response = await apiClient.get("/auth/me");
-        return response.data;
-    } catch (error: any) {
-        // 토큰이 없거나 만료된 경우
-        if (error.response?.status === 401) {
-            return rejectWithValue("인증이 필요합니다.");
-        }
-        return rejectWithValue("사용자 정보를 가져올 수 없습니다.");
-    }
-});
-
-/**
- * 🔐 로그인 (Cookie 기반)
- */
+// 로그인
 export const loginUser = createAsyncThunk<
     LoginResponse,
     LoginRequest,
     { rejectValue: string }
->("auth/loginUser", async (credentials: LoginRequest, { rejectWithValue }) => {
+>("auth/loginUser", async (credentials, { rejectWithValue }) => {
     try {
-        // 🌐 서버로 로그인 요청
-        const response = await apiClient.post("/auth/login", credentials);
+        const response = await authApi.login(credentials);
 
-        // 🍪 서버에서 httpOnly cookie로 JWT 토큰 설정됨
-        // Set-Cookie: token=jwt_token; HttpOnly; Secure; SameSite=Strict; Max-Age=3600
+        // 성공 여부 확인
+        if (response.statusCode !== 200 || !response.data) {
+            return rejectWithValue(
+                response.message || "로그인에 실패했습니다."
+            );
+        }
 
-        return response.data;
+        // 토큰 저장
+        const { accessToken, refreshToken, expiresIn } = response.data;
+        const accessTokenExpireDays = expiresIn
+            ? expiresIn / (24 * 60 * 60)
+            : 1;
+        cookieStorage.setTokens(
+            accessToken,
+            refreshToken,
+            accessTokenExpireDays
+        );
+
+        return response;
     } catch (error: any) {
         const errorMessage =
             error.response?.data?.message ||
             error.message ||
             "로그인에 실패했습니다.";
-
         return rejectWithValue(errorMessage);
     }
 });
 
-/**
- * 🚪 로그아웃 (Cookie 기반)
- */
+// 회원가입
+export const signupUser = createAsyncThunk<
+    SignupResponse,
+    SignupRequest,
+    { rejectValue: string }
+>("auth/signupUser", async (userData, { rejectWithValue }) => {
+    try {
+        const response = await authApi.signup(userData);
+
+        if (response.statusCode !== 200) {
+            return rejectWithValue(
+                response.message || "회원가입에 실패했습니다."
+            );
+        }
+
+        return response;
+    } catch (error: any) {
+        const errorMessage =
+            error.response?.data?.message ||
+            error.message ||
+            "회원가입에 실패했습니다.";
+        return rejectWithValue(errorMessage);
+    }
+});
+
+// 로그아웃
 export const logoutUser = createAsyncThunk<void, void, { rejectValue: string }>(
     "auth/logoutUser",
     async (_, { rejectWithValue }) => {
         try {
-            // 🌐 서버로 로그아웃 요청
-            await apiClient.post("/auth/logout");
-
-            // 🍪 서버에서 쿠키 삭제 처리
-            // Set-Cookie: token=; HttpOnly; Secure; SameSite=Strict; Max-Age=0
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await authApi.logout();
         } catch (error: any) {
-            // 로그아웃 실패해도 클라이언트 상태는 초기화
-            const errorMessage =
-                error.response?.data?.message ||
-                "로그아웃 처리 중 오류가 발생했습니다.";
-
-            return rejectWithValue(errorMessage);
+            console.warn("로그아웃 API 호출 실패:", error);
+            // 서버 로그아웃 실패해도 클라이언트 상태는 정리
         }
+
+        // 토큰 정리
+        cookieStorage.clearTokens();
     }
 );
 
-/**
- * 🔄 토큰 갱신 (자동)
- */
-export const refreshToken = createAsyncThunk<
-    { csrfToken?: string },
+// 현재 사용자 정보 확인
+export const checkAuthStatus = createAsyncThunk<
+    User,
+    void,
+    { rejectValue: string }
+>("auth/checkAuthStatus", async (_, { rejectWithValue }) => {
+    try {
+        const accessToken = cookieStorage.getAccessToken();
+        const refreshToken = cookieStorage.getRefreshToken();
+
+        if (!accessToken || !refreshToken) {
+            return rejectWithValue("토큰이 없습니다.");
+        }
+
+        const response = await authApi.me();
+
+        if (response.statusCode !== 200 || !response.data) {
+            return rejectWithValue("사용자 정보를 가져올 수 없습니다.");
+        }
+
+        return response.data;
+    } catch (error: any) {
+        // 토큰 만료 등의 이유로 실패하면 토큰 정리
+        cookieStorage.clearTokens();
+        return rejectWithValue("인증 확인에 실패했습니다.");
+    }
+});
+
+// 토큰 수동 갱신
+export const refreshTokenManual = createAsyncThunk<
+    LoginResponse,
     void,
     { rejectValue: string }
 >("auth/refreshToken", async (_, { rejectWithValue }) => {
     try {
-        // 🔄 리프레시 토큰으로 새 토큰 발급
-        const response = await apiClient.post("/auth/refresh");
+        const refreshToken = cookieStorage.getRefreshToken();
 
-        // 🍪 새로운 토큰이 쿠키로 설정됨
-        return response.data;
+        if (!refreshToken) {
+            return rejectWithValue("Refresh Token이 없습니다.");
+        }
+
+        const response = await authApi.refreshToken(refreshToken);
+
+        if (response.statusCode !== 200 || !response.data) {
+            return rejectWithValue("토큰 갱신에 실패했습니다.");
+        }
+
+        // 새 토큰을 쿠키에 저장
+        const {
+            accessToken: newAccessToken,
+            refreshToken: newRefreshToken,
+            expiresIn,
+        } = response.data;
+        const accessTokenExpireDays = expiresIn
+            ? expiresIn / (24 * 60 * 60)
+            : 1;
+        cookieStorage.setTokens(
+            newAccessToken,
+            newRefreshToken,
+            accessTokenExpireDays
+        );
+
+        return response;
     } catch (error: any) {
+        // 갱신 실패 시 토큰 정리
+        cookieStorage.clearTokens();
         return rejectWithValue("토큰 갱신에 실패했습니다.");
     }
 });
-
-// 🔸 Slice 정의
+// Slice 정의
 const authSlice = createSlice({
     name: "auth",
     initialState,
     reducers: {
+        // 에러 초기화
         clearError: (state) => {
             state.error = null;
         },
 
+        // 강제 로그아웃 (401 에러 등)
         forceLogout: (state) => {
             state.isAuthenticated = false;
             state.user = null;
-            state.csrfToken = null;
+            state.accessToken = null;
+            state.refreshToken = null;
+            state.tokenExpiresAt = null;
             state.error = null;
             state.loading = false;
+            cookieStorage.clearTokens();
         },
 
+        // 사용자 정보 업데이트
         updateUser: (state, action: PayloadAction<Partial<User>>) => {
             if (state.user) {
                 state.user = { ...state.user, ...action.payload };
             }
         },
 
-        // CSRF 토큰 설정
-        setCsrfToken: (state, action: PayloadAction<string>) => {
-            state.csrfToken = action.payload;
+        // 토큰 설정 (인터셉터에서 사용)
+        setTokens: (
+            state,
+            action: PayloadAction<{
+                accessToken: string;
+                refreshToken: string;
+                expiresIn?: number;
+            }>
+        ) => {
+            const { accessToken, refreshToken, expiresIn } = action.payload;
+            state.accessToken = accessToken;
+            state.refreshToken = refreshToken;
+            state.isAuthenticated = true;
+
+            if (expiresIn) {
+                state.tokenExpiresAt = Date.now() + expiresIn * 1000;
+            }
         },
+
+        // 에러 리셋
         resetError: (state) => {
             state.error = null;
         },
     },
     extraReducers: (builder) => {
-        // 🔍 인증 상태 확인
-        builder
-            .addCase(checkAuthStatus.pending, (state) => {
-                state.loading = true;
-                state.error = null;
-            })
-            .addCase(checkAuthStatus.fulfilled, (state, action) => {
-                state.loading = false;
-                state.isAuthenticated = true;
-                state.user = action.payload.user;
-                state.csrfToken = action.payload.csrfToken || null;
-                state.error = null;
-            })
-            .addCase(checkAuthStatus.rejected, (state, action) => {
-                state.loading = false;
-                state.isAuthenticated = false;
-                state.user = null;
-                state.csrfToken = null;
-                state.error = null; // 초기 로딩 실패는 에러로 표시하지 않음
-            });
-
-        // 🔐 로그인
+        // 로그인
         builder
             .addCase(loginUser.pending, (state) => {
                 state.loading = true;
@@ -226,19 +255,39 @@ const authSlice = createSlice({
             .addCase(loginUser.fulfilled, (state, action) => {
                 state.loading = false;
                 state.isAuthenticated = true;
-                state.user = action.payload.user;
-                state.csrfToken = action.payload.csrfToken || null;
+                state.accessToken = action.payload.data.accessToken;
+                state.refreshToken = action.payload.data.refreshToken;
+                state.tokenExpiresAt =
+                    Date.now() + action.payload.data.expiresIn * 1000;
                 state.error = null;
+                // 사용자 정보는 별도로 checkAuthStatus에서 가져옴
             })
             .addCase(loginUser.rejected, (state, action) => {
                 state.loading = false;
                 state.isAuthenticated = false;
                 state.user = null;
-                state.csrfToken = null;
+                state.accessToken = null;
+                state.refreshToken = null;
+                state.tokenExpiresAt = null;
                 state.error = action.payload || "로그인에 실패했습니다.";
             });
 
-        // 🚪 로그아웃
+        // 회원가입
+        builder
+            .addCase(signupUser.pending, (state) => {
+                state.loading = true;
+                state.error = null;
+            })
+            .addCase(signupUser.fulfilled, (state) => {
+                state.loading = false;
+                state.error = null;
+            })
+            .addCase(signupUser.rejected, (state, action) => {
+                state.loading = false;
+                state.error = action.payload || "회원가입에 실패했습니다.";
+            });
+
+        // 로그아웃
         builder
             .addCase(logoutUser.pending, (state) => {
                 state.loading = true;
@@ -247,38 +296,70 @@ const authSlice = createSlice({
                 state.loading = false;
                 state.isAuthenticated = false;
                 state.user = null;
-                state.csrfToken = null;
+                state.accessToken = null;
+                state.refreshToken = null;
+                state.tokenExpiresAt = null;
                 state.error = null;
             })
-            .addCase(logoutUser.rejected, (state, action) => {
+            .addCase(logoutUser.rejected, (state) => {
                 // 로그아웃 실패해도 상태는 초기화
                 state.loading = false;
                 state.isAuthenticated = false;
                 state.user = null;
-                state.csrfToken = null;
-                state.error = action.payload || null;
+                state.accessToken = null;
+                state.refreshToken = null;
+                state.tokenExpiresAt = null;
             });
 
-        // 🔄 토큰 갱신
+        // 인증 상태 확인
         builder
-            .addCase(refreshToken.fulfilled, (state, action) => {
-                state.csrfToken = action.payload.csrfToken || null;
+            .addCase(checkAuthStatus.pending, (state) => {
+                state.loading = true;
+                state.error = null;
             })
-            .addCase(refreshToken.rejected, (state) => {
+            .addCase(checkAuthStatus.fulfilled, (state, action) => {
+                state.loading = false;
+                state.user = action.payload;
+                state.isAuthenticated = true;
+                state.error = null;
+            })
+            .addCase(checkAuthStatus.rejected, (state) => {
+                state.loading = false;
+                state.isAuthenticated = false;
+                state.user = null;
+                state.accessToken = null;
+                state.refreshToken = null;
+                state.tokenExpiresAt = null;
+                state.error = null; // 초기 로딩 실패는 에러로 표시하지 않음
+            });
+
+        // 토큰 갱신
+        builder
+            .addCase(refreshTokenManual.fulfilled, (state, action) => {
+                state.accessToken = action.payload.data.accessToken;
+                state.refreshToken = action.payload.data.refreshToken;
+                state.tokenExpiresAt =
+                    Date.now() + action.payload.data.expiresIn * 1000;
+                state.isAuthenticated = true;
+            })
+            .addCase(refreshTokenManual.rejected, (state) => {
                 // 토큰 갱신 실패시 로그아웃 처리
                 state.isAuthenticated = false;
                 state.user = null;
-                state.csrfToken = null;
+                state.accessToken = null;
+                state.refreshToken = null;
+                state.tokenExpiresAt = null;
             });
     },
 });
 
-// 🔸 내보내기
-export const { clearError, forceLogout, updateUser, setCsrfToken, resetError } =
+// 내보내기
+export const { clearError, forceLogout, updateUser, setTokens, resetError } =
     authSlice.actions;
+
 export default authSlice.reducer;
 
-// 🔸 선택자
+// 선택자
 export const selectAuth = (state: { auth: AuthState }) => state.auth;
 export const selectIsAuthenticated = (state: { auth: AuthState }) =>
     state.auth.isAuthenticated;
@@ -286,5 +367,11 @@ export const selectUser = (state: { auth: AuthState }) => state.auth.user;
 export const selectAuthLoading = (state: { auth: AuthState }) =>
     state.auth.loading;
 export const selectAuthError = (state: { auth: AuthState }) => state.auth.error;
-export const selectCsrfToken = (state: { auth: AuthState }) =>
-    state.auth.csrfToken;
+export const selectTokens = (state: { auth: AuthState }) => ({
+    accessToken: state.auth.accessToken,
+    refreshToken: state.auth.refreshToken,
+    expiresAt: state.auth.tokenExpiresAt,
+});
+
+// 타입 내보내기
+export type { LoginRequest, SignupRequest, User };
