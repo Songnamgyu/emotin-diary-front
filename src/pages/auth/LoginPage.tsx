@@ -1,4 +1,7 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useDispatch, useSelector } from "react-redux";
 import {
     Box,
     Container,
@@ -11,20 +14,29 @@ import {
     InputAdornment,
     Divider,
     Stack,
-    // CircularProgress,
-    // Alert,
+    Alert,
+    CircularProgress,
 } from "@mui/material";
 import { Visibility, VisibilityOff, Google } from "@mui/icons-material";
-// import { useAuth } from '../../hooks/auth/useAuth';
+import { loginUser, clearError } from "../../store/slice/authSlice";
+import type { RootState, AppDispatch } from "../../store/store";
 
 const LoginPage: React.FC = () => {
+    const navigate = useNavigate();
+
+    // 🔸 Redux 직접 사용
+    const dispatch = useDispatch<AppDispatch>();
+    const { loading, error, isAuthenticated } = useSelector(
+        (state: RootState) => state.auth
+    );
+
     const [formData, setFormData] = useState({
         email: "",
         password: "",
     });
+
     const [showPassword, setShowPassword] = useState(false);
-    const [errors, setErrors] = useState<Record<string, string>>({});
-    // const { login, loading, error } = useAuth();
+    const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
@@ -32,29 +44,76 @@ const LoginPage: React.FC = () => {
             ...prev,
             [name]: value,
         }));
-        // 에러 제거
-        if (errors[name]) {
-            setErrors((prev) => ({
+
+        if (fieldErrors[name]) {
+            setFieldErrors((prev) => ({
                 ...prev,
                 [name]: "",
             }));
         }
+
+        if (error) {
+            dispatch(clearError());
+        }
     };
 
-    // const handleSubmit = async (e: React.FormEvent) => {
-    //     e.preventDefault();
-    //     const newErrors: Record<string, string> = {};
+    const validateForm = () => {
+        const newErrors: Record<string, string> = {};
 
-    //     if (!formData.email) newErrors.email = "이메일을 입력해주세요";
-    //     if (!formData.password) newErrors.password = "비밀번호를 입력해주세요";
+        if (!formData.email) {
+            newErrors.email = "이메일을 입력해주세요";
+        } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
+            newErrors.email = "올바른 이메일 형식이 아닙니다";
+        }
 
-    //     if (Object.keys(newErrors).length > 0) {
-    //         setErrors(newErrors);
-    //         return;
-    //     }
+        if (!formData.password) {
+            newErrors.password = "비밀번호를 입력해주세요";
+        } else if (formData.password.length < 6) {
+            newErrors.password = "비밀번호는 6자 이상이어야 합니다";
+        }
 
-    //     await login(formData);
-    // };
+        return newErrors;
+    };
+
+    // 🔸 dispatch 직접 사용하는 handleSubmit
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+
+        const validationErrors = validateForm();
+
+        if (Object.keys(validationErrors).length > 0) {
+            setFieldErrors(validationErrors);
+            return;
+        }
+
+        setFieldErrors({});
+        dispatch(clearError());
+
+        try {
+            // ✅ dispatch로 직접 액션 호출
+            const result = await dispatch(
+                loginUser({
+                    usernameOrEmail: formData.email,
+                    password: formData.password,
+                })
+            ).unwrap(); // unwrap()으로 Promise 체인 사용
+
+            // 성공 시 처리
+            console.log("로그인 성공!", result);
+            navigate("/dashboard");
+        } catch (rejectedValue: any) {
+            // 실패 시 처리 (에러는 Redux state에 자동 저장됨)
+            console.error("로그인 실패:", rejectedValue);
+            // 추가 에러 처리가 필요하면 여기서
+        }
+    };
+
+    // 인증 상태 변화 감지하여 자동 리다이렉트 (선택사항)
+    React.useEffect(() => {
+        if (isAuthenticated) {
+            navigate("/dashboard");
+        }
+    }, [isAuthenticated, navigate]);
 
     return (
         <Box
@@ -69,7 +128,6 @@ const LoginPage: React.FC = () => {
             }}
         >
             <Container maxWidth="sm">
-                {/* 로고 및 헤더 */}
                 <Box textAlign="center" mb={4}>
                     <Avatar
                         sx={{
@@ -91,21 +149,20 @@ const LoginPage: React.FC = () => {
                     </Typography>
                 </Box>
 
-                {/* 로그인 폼 */}
                 <Paper elevation={8} sx={{ p: 4, borderRadius: 3 }}>
                     <Typography variant="h6" gutterBottom align="center" mb={3}>
                         로그인
                     </Typography>
 
-                    {/* {error && (
+                    {error && (
                         <Alert severity="error" sx={{ mb: 2 }}>
                             {error}
                         </Alert>
-                    )} */}
+                    )}
 
                     <Box
                         component="form"
-                        // onSubmit={handleSubmit}
+                        onSubmit={handleSubmit}
                         sx={{
                             display: "flex",
                             flexDirection: "column",
@@ -119,9 +176,10 @@ const LoginPage: React.FC = () => {
                             type="email"
                             value={formData.email}
                             onChange={handleChange}
-                            error={!!errors.email}
-                            helperText={errors.email}
+                            error={!!fieldErrors.email}
+                            helperText={fieldErrors.email}
                             variant="outlined"
+                            disabled={loading}
                             InputProps={{
                                 startAdornment: (
                                     <InputAdornment position="start">
@@ -138,9 +196,10 @@ const LoginPage: React.FC = () => {
                             type={showPassword ? "text" : "password"}
                             value={formData.password}
                             onChange={handleChange}
-                            error={!!errors.password}
-                            helperText={errors.password}
+                            error={!!fieldErrors.password}
+                            helperText={fieldErrors.password}
                             variant="outlined"
+                            disabled={loading}
                             InputProps={{
                                 startAdornment: (
                                     <InputAdornment position="start">
@@ -154,6 +213,7 @@ const LoginPage: React.FC = () => {
                                                 setShowPassword(!showPassword)
                                             }
                                             edge="end"
+                                            disabled={loading}
                                         >
                                             {showPassword ? (
                                                 <VisibilityOff />
@@ -171,7 +231,7 @@ const LoginPage: React.FC = () => {
                             type="submit"
                             variant="contained"
                             size="large"
-                            // disabled={loading}
+                            disabled={loading}
                             sx={{
                                 py: 1.5,
                                 background:
@@ -180,9 +240,12 @@ const LoginPage: React.FC = () => {
                                     background:
                                         "linear-gradient(45deg, #7b1fa2 30%, #c2185b 90%)",
                                 },
+                                "&:disabled": {
+                                    background: "rgba(0, 0, 0, 0.12)",
+                                },
                             }}
                         >
-                            {/* {loading ? (
+                            {loading ? (
                                 <Box display="flex" alignItems="center" gap={1}>
                                     <CircularProgress
                                         size={20}
@@ -192,7 +255,7 @@ const LoginPage: React.FC = () => {
                                 </Box>
                             ) : (
                                 "로그인"
-                            )} */}
+                            )}
                         </Button>
 
                         <Typography
@@ -201,7 +264,13 @@ const LoginPage: React.FC = () => {
                             color="text.secondary"
                         >
                             계정이 없으신가요?{" "}
-                            <Button color="primary" variant="text" size="small">
+                            <Button
+                                color="primary"
+                                variant="text"
+                                size="small"
+                                onClick={() => navigate("/register")}
+                                disabled={loading}
+                            >
                                 회원가입
                             </Button>
                         </Typography>
@@ -212,14 +281,13 @@ const LoginPage: React.FC = () => {
                             </Typography>
                         </Divider>
 
-                        {/* 기존 Grid 사용 - component prop 추가 */}
-                        {/* ✅ Grid 대신 Stack 사용 - 완전히 해결! */}
                         <Stack direction="row" spacing={2}>
                             <Button
                                 fullWidth
                                 variant="outlined"
                                 startIcon={<Google />}
                                 sx={{ py: 1.5 }}
+                                disabled={loading}
                             >
                                 Google
                             </Button>
@@ -228,6 +296,7 @@ const LoginPage: React.FC = () => {
                                 variant="outlined"
                                 startIcon={<span>💬</span>}
                                 sx={{ py: 1.5 }}
+                                disabled={loading}
                             >
                                 KakaoTalk
                             </Button>
@@ -249,3 +318,30 @@ const LoginPage: React.FC = () => {
 };
 
 export default LoginPage;
+
+/**
+ * 🔄 dispatch vs useAuth 비교:
+ *
+ * dispatch 방식의 장점:
+ * ✅ Redux를 직접 사용하여 더 명시적
+ * ✅ 미들웨어나 추가 로직이 필요 없음
+ * ✅ Redux DevTools에서 액션 추적이 더 명확
+ * ✅ unwrap()으로 Promise 체인 사용 가능
+ *
+ * dispatch 방식의 단점:
+ * ❌ 컴포넌트에서 Redux 로직이 노출됨
+ * ❌ useSelector로 상태를 수동으로 구독해야 함
+ * ❌ 타입 안전성을 위해 AppDispatch 타입 지정 필요
+ * ❌ 코드가 더 장황해짐
+ *
+ * useAuth 방식의 장점:
+ * ✅ 인증 관련 로직이 캡슐화됨
+ * ✅ 컴포넌트가 Redux에 직접 의존하지 않음
+ * ✅ 테스트하기 쉬움
+ * ✅ 재사용성이 높음
+ * ✅ 코드가 더 간결함
+ *
+ * useAuth 방식의 단점:
+ * ❌ 추가 추상화 레이어
+ * ❌ 복잡한 상태 조작이 어려울 수 있음
+ */
